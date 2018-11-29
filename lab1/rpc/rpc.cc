@@ -656,7 +656,55 @@ rpcs::checkduplicate_and_update(unsigned int clt_nonce, unsigned int xid,
 {
 	ScopedLock rwl(&reply_window_m_);
 
-        // You fill this in for Lab 1.
+	// You fill this in for Lab 1.
+	// reply_window_[clt_nonce]中的xid是按从小到大的顺序排序的
+	// 第一个xid都比请求的xid大说明请求的xid已经被丢弃了
+	if (reply_window_[clt_nonce].front().xid > xid)
+	{
+		return FORGOTTEN;
+	}
+
+	reply_t reply(xid);
+	auto it = reply_window_[clt_nonce].begin();
+
+	for(; it != reply_window_[clt_nonce].end(); ++it)
+	{
+		if(it->xid < xid_rep && it->cb_present)
+		{
+			free(it->buf);
+			it = reply_window_[clt_nonce].erase(it);
+			--it;
+		}
+
+		if (it->xid == xid)
+		{
+			if(it->cb_present)
+			{
+				*b = it->buf;
+				*sz = it->sz;
+				return DONE;
+			}
+			else
+			{
+				return INPROGRESS;
+			}
+		}
+
+	}
+
+	// 不存在说明是新请求，并将该请求加入滑动窗口中
+	for(it = reply_window_[clt_nonce].begin(); it != reply_window_[clt_nonce].end(); ++it)
+	{
+		if(xid < it->xid)
+		{
+			reply_window_[clt_nonce].insert(it, reply);
+			break;
+		}
+	}
+	if(it == reply_window_[clt_nonce].end())
+	{
+		reply_window_[clt_nonce].push_back(reply);
+	}
 	return NEW;
 }
 
@@ -670,7 +718,21 @@ rpcs::add_reply(unsigned int clt_nonce, unsigned int xid,
 		char *b, int sz)
 {
 	ScopedLock rwl(&reply_window_m_);
-        // You fill this in for Lab 1.
+	// You fill this in for Lab 1.
+	auto it = reply_window_.find(clt_nonce);
+	if(it != reply_window_.end())
+	{
+		for(auto iter = it->second.begin(); iter != it->second.end(); ++iter)
+		{
+			if(iter->xid == xid)
+			{
+				iter->buf = b;
+				iter->sz = sz;
+				iter->cb_present = true;
+				break;
+			}
+		}
+	}
 }
 
 void
