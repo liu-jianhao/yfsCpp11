@@ -12,6 +12,7 @@
 
 class yfs_client {
   extent_client *ec;
+  lock_client *m_lc;
  public:
 
   typedef unsigned long long inum;
@@ -56,6 +57,24 @@ class yfs_client {
   int read(inum, off_t, size_t, std::string&);
   int write(inum, off_t, size_t, const char*);
 
+  int mkdir(inum, const char*, mode_t, inum&);
+  int unlink(inum, const char*);
+};
+
+class LockGuard {
+public:
+  LockGuard(lock_client *lc, lock_protocol::lockid_t lid) : m_lc(lc), m_lid(lid)
+  {
+    m_lc->acquire(m_lid);
+  }
+
+  ~LockGuard()
+  {
+    m_lc->release(m_lid);
+  }
+private:
+  lock_client *m_lc;
+  lock_protocol::lockid_t m_lid;
 };
 
 #endif 

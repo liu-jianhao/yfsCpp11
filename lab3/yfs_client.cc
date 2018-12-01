@@ -14,7 +14,7 @@
 yfs_client::yfs_client(std::string extent_dst, std::string lock_dst)
 {
   ec = new extent_client(extent_dst);
-
+  m_lc = new lock_client(lock_dst);
 }
 
 yfs_client::inum
@@ -106,6 +106,7 @@ yfs_client::random_inum(bool isfile)
 int
 yfs_client::create(inum parent, const char* name, inum& inum)
 {
+  LockGuard lg(m_lc, parent);
   std::string data;
   std::string file_name;
   if(ec->get(parent, data) != extent_protocol::OK)
@@ -212,6 +213,7 @@ yfs_client::readdir(inum inum, std::list<dirent> & dirents)
 int
 yfs_client::setattr(inum inum, struct stat* attr)
 {
+  LockGuard lg(m_lc, inum);
   size_t size = attr->st_size;
   std::string buf;
   if(ec->get(inum, buf) != extent_protocol::OK)
@@ -257,6 +259,7 @@ yfs_client::read(inum inum, off_t off, size_t size, std::string &buf)
 int
 yfs_client::write(inum inum, off_t off, size_t size, const char *buf)
 {
+  LockGuard lg(m_lc, inum);
   std::string data;
   if(ec->get(inum, data) != extent_protocol::OK)
   {
@@ -281,4 +284,82 @@ yfs_client::write(inum inum, off_t off, size_t size, const char *buf)
   return OK; 
 }
 
+int
+yfs_client::mkdir(inum parent, const char *name, mode_t mode, inum &inum)
+{
+  LockGuard lg(m_lc, parent);
+  std::string data;
+  std::string dir_name;
+  if (ec->get(parent, data) != extent_protocol::OK)
+  {
+    return IOERR;
+  }
 
+  dir_name = "/" + std::string(name) + "/";
+  // 目录已经存在
+  if (data.find(dir_name) != std::string::npos)
+  {
+    return EXIST;
+  }
+
+  inum = random_inum(false);
+  if (ec->put(inum, std::string()) != extent_protocol::OK)
+  {
+    return IOERR;
+  }
+
+  data.append(dir_name + filename(inum) + "/");
+  if (ec->put(parent, data) != extent_protocol::OK)
+  {
+    return IOERR;
+  }
+
+  return OK;
+}
+
+int yfs_client::unlink(inum parent, const char* name)
+{
+  LockGuard lg(m_lc, parent);
+  std::string data;
+  std::string file_name = "/" + std::string(name) + "/";
+  size_t pos, end, len; 
+  inum inum;
+
+  if(ec->get(parent, data) != extent_protocol::OK)
+  {
+    return IOERR;
+  }
+
+  // 没有这个文件
+  if((pos = data.find(file_name)) == std::string::npos)
+  {
+    return NOENT;
+  }
+
+  end = data.find_first_of("/", pos+file_name.size());
+  if(end == std::string::npos)
+  {
+    return NOENT;
+  }
+  len = end - file_name.size() - pos;
+  inum = n2i(data.substr(pos+file_name.size(), len));
+  if(!isfile(inum))
+  {
+    return IOERR;
+  }
+
+  // 从目录中移除文件
+  data.erase(pos, end-pos+1);
+  if(ec->put(parent, data) != extent_protocol::OK)
+  {
+    return IOERR;
+  }
+  
+  // 删除文件
+  if(ec->remove(inum) != extent_protocol::OK)
+  {
+    return IOERR;
+  }
+
+  return OK;
+}
