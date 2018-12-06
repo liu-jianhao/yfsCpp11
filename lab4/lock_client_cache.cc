@@ -43,17 +43,20 @@ lock_client_cache::acquire(lock_protocol::lockid_t lid)
     switch(it->second.state)
     {
       case NONE:
+        // 当客户端尝试向服务器获取锁时，状态变为ACQUIRING
         it->second.state = ACQUIRING;
         it->second.retry = false;
         lck.unlock();
         ret = cl->call(lock_protocol::acquire, lid, id, r);
         lck.lock();
 
+        // 成功获得锁
         if(ret == lock_protocol::OK)
         {
           it->second.state = LOCKED;
           return ret;
         }
+        // 否则挂起在retryQueue
         else if(ret == lock_protocol::RETRY)
         {
           if(!it->second.retry)

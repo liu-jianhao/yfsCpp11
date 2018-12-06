@@ -29,7 +29,9 @@ private:
   };
 
   struct lock_entry {
+    // 记录锁持有者的地址
     std::string owner;
+    // 记录锁等待的所有客户
     std::set<std::string> waitSet;
     bool revoked;
     lock_state state;

@@ -50,6 +50,10 @@ int lock_server_cache::acquire(lock_protocol::lockid_t lid, std::string id,
       ret = lock_protocol::RETRY;
       break;
 
+    // 表示正在发送retry给客户端，此时的acquire可能是该客户端收到retry后发送的，
+    // 这时查看waitset中是否包含该客户端，包含则说明就是该客户端发送来的，从waitset中删除
+    // 如果waitset没有其他等待客户端将锁改为LOCKED，返回OK；反之修改为LOCKED_AND_WAIT
+    // 如果包含该客户端，保存入waitset，返回RETRY
     case RETRYING:
       if(it->second.waitSet.count(id))
       {

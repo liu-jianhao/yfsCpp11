@@ -48,7 +48,9 @@ private:
   };
 
   struct lock_entry {
+    // 记录是否收到revokedRPC
     bool revoked;
+    // 记录是否收到retryRPC
     bool retry;
     lock_state state;
 
@@ -60,6 +62,7 @@ private:
   std::map<lock_protocol::lockid_t, lock_entry> m_lockMap;
   std::mutex m_mutex;
 
+  // 三个条件变量
   std::condition_variable waitQueue;
   std::condition_variable releaseQueue;
   std::condition_variable retryQueue;
