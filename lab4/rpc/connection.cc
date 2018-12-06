@@ -326,7 +326,11 @@ tcpsconn::tcpsconn(chanmgr *m1, int port, int lossytest)
 		VERIFY(0);
 	}
 
-	jsl_log(JSL_DBG_2, "tcpsconn::tcpsconn listen on %d %d\n", port, 
+        socklen_t addrlen = sizeof(sin);
+        VERIFY(getsockname(tcp_, (sockaddr *)&sin, &addrlen) == 0);
+        port_ = ntohs(sin.sin_port);
+
+	jsl_log(JSL_DBG_2, "tcpsconn::tcpsconn listen on %d %d\n", port_, 
 		sin.sin_port);
 
 	if (pipe(pipe_) < 0) {
@@ -440,5 +444,3 @@ connect_to_dst(const sockaddr_in &dst, chanmgr *mgr, int lossy)
 			s, inet_ntoa(dst.sin_addr), (int)ntohs(dst.sin_port));
 	return new connection(mgr, s, lossy);
 }
-
-

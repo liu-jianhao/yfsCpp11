@@ -5,6 +5,7 @@
 #define lock_client_cache_h
 
 #include <string>
+#include <map>
 #include "lock_protocol.h"
 #include "rpc.h"
 #include "lock_client.h"
@@ -26,7 +27,6 @@ class lock_client_cache : public lock_client {
   std::string hostname;
   std::string id;
  public:
-  static int last_port;
   lock_client_cache(std::string xdst, class lock_release_user *l = 0);
   virtual ~lock_client_cache() {};
   lock_protocol::status acquire(lock_protocol::lockid_t);
@@ -35,6 +35,35 @@ class lock_client_cache : public lock_client {
                                         int &);
   rlock_protocol::status retry_handler(lock_protocol::lockid_t, 
                                        int &);
+
+private:
+  enum lock_state {
+    NONE,
+    FREE,
+    LOCKED,
+    ACQUIRING,
+    RELEASING
+  };
+
+  struct lock_entry {
+    bool revoked;
+    bool retry;
+    lock_state state;
+
+    pthread_cond_t waitQueue;
+    pthread_cond_t releaseQueue;
+    pthread_cond_t retryQueue;
+
+    lock_entry() : revoked(false), retry(false), state(NONE)
+    {
+      pthread_cond_init(&waitQueue, NULL);
+      pthread_cond_init(&releaseQueue, NULL);
+      pthread_cond_init(&retryQueue, NULL);
+    }
+  };
+
+  std::map<lock_protocol::lockid_t, lock_entry> m_lockMap;
+  pthread_mutex_t m_mutex;
 };
 
 

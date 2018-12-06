@@ -73,10 +73,10 @@ class tcpsconn {
 	public:
 		tcpsconn(chanmgr *m1, int port, int lossytest=0);
 		~tcpsconn();
-
+                inline int port() { return port_; }
 		void accept_conn();
 	private:
-
+                int port_;
 		pthread_mutex_t m_;
 		pthread_t th_;
 		int pipe_[2];
