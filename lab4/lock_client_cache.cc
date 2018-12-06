@@ -22,8 +22,6 @@ lock_client_cache::lock_client_cache(std::string xdst,
   std::ostringstream host;
   host << hname << ":" << rlsrpc->port();
   id = host.str();
-
-  pthread_mutex_init(&m_mutex, NULL);
 }
 
 lock_protocol::status
@@ -32,7 +30,7 @@ lock_client_cache::acquire(lock_protocol::lockid_t lid)
   int r;
   int ret = lock_protocol::OK;
 
-  pthread_mutex_lock(&m_mutex);
+  std::unique_lock<std::mutex> lck(m_mutex);
 
   auto it = m_lockMap.find(lid);
   if(it == m_lockMap.end())
@@ -47,65 +45,62 @@ lock_client_cache::acquire(lock_protocol::lockid_t lid)
       case NONE:
         it->second.state = ACQUIRING;
         it->second.retry = false;
-        pthread_mutex_unlock(&m_mutex);
+        lck.unlock();
         ret = cl->call(lock_protocol::acquire, lid, id, r);
-        pthread_mutex_lock(&m_mutex);
+        lck.lock();
 
         if(ret == lock_protocol::OK)
         {
           it->second.state = LOCKED;
-          pthread_mutex_unlock(&m_mutex);
           return ret;
         }
         else if(ret == lock_protocol::RETRY)
         {
           if(!it->second.retry)
           {
-            pthread_cond_wait(&it->second.retryQueue, &m_mutex);
+            retryQueue.wait(lck);
           }
         }
         break;
 
       case FREE:
         it->second.state = LOCKED;
-        pthread_mutex_unlock(&m_mutex);
         return ret;
         break;
 
       case LOCKED:
-        pthread_cond_wait(&it->second.waitQueue, &m_mutex);
+        waitQueue.wait(lck);
         break;
       
       case ACQUIRING:
         if(!it->second.retry)
         {
-          pthread_cond_wait(&it->second.waitQueue, &m_mutex);
+          waitQueue.wait(lck);
         }
         else
         {
           it->second.retry = false;
-          pthread_mutex_unlock(&m_mutex);
+          lck.unlock();
           ret = cl->call(lock_protocol::acquire, lid, id, r);
-          pthread_mutex_lock(&m_mutex);
+          lck.lock();
 
           if(ret == lock_protocol::OK)
           {
             it->second.state = LOCKED;
-            pthread_mutex_unlock(&m_mutex);
             return ret;
           }
           else if(ret == lock_protocol::RETRY)
           {
             if(!it->second.retry)
             {
-              pthread_cond_wait(&it->second.retryQueue, &m_mutex);
+              retryQueue.wait(lck);
             }
           }
         }
         break;
 
       case RELEASING:
-        pthread_cond_wait(&it->second.releaseQueue, &m_mutex);
+        releaseQueue.wait(lck);
         break;
     }
   }
@@ -119,7 +114,7 @@ lock_client_cache::release(lock_protocol::lockid_t lid)
   int r;
   lock_protocol::status ret = lock_protocol::OK;
 
-  pthread_mutex_lock(&m_mutex);
+  std::unique_lock<std::mutex> lck(m_mutex);
 
   auto it = m_lockMap.find(lid);
   if(it == m_lockMap.end())
@@ -132,20 +127,19 @@ lock_client_cache::release(lock_protocol::lockid_t lid)
     it->second.state = RELEASING;
     it->second.revoked = false;
 
-    pthread_mutex_unlock(&m_mutex);
+    lck.unlock();
     ret = cl->call(lock_protocol::release, lid, id, r);
-    pthread_mutex_lock(&m_mutex);
+    lck.lock();
 
     it->second.state = NONE;
-    pthread_cond_broadcast(&it->second.releaseQueue);
+    releaseQueue.notify_all();
   }
   else
   {
     it->second.state = FREE;
-    pthread_cond_signal(&it->second.waitQueue);
+    waitQueue.notify_one();
   }
 
-  pthread_mutex_unlock(&m_mutex);
   return ret;
 }
 
@@ -156,7 +150,7 @@ lock_client_cache::revoke_handler(lock_protocol::lockid_t lid,
   int r;
   int ret = rlock_protocol::OK;
 
-  pthread_mutex_lock(&m_mutex);
+  std::unique_lock<std::mutex> lck(m_mutex);
 
   auto it = m_lockMap.find(lid);
   if(it == m_lockMap.end())
@@ -167,19 +161,18 @@ lock_client_cache::revoke_handler(lock_protocol::lockid_t lid,
   if(it->second.state == FREE)
   {
     it->second.state = RELEASING;
-    pthread_mutex_unlock(&m_mutex);
+    lck.unlock();
     cl->call(lock_protocol::release, lid, id, r);
-    pthread_mutex_lock(&m_mutex);
+    lck.lock();
 
     it->second.state = NONE;
-    pthread_cond_broadcast(&it->second.releaseQueue);
+    releaseQueue.notify_all();
   }
   else
   {
     it->second.revoked = true;
   }
 
-  pthread_mutex_unlock(&m_mutex);
   return ret;
 }
 
@@ -189,7 +182,7 @@ lock_client_cache::retry_handler(lock_protocol::lockid_t lid,
 {
   int ret = rlock_protocol::OK;
 
-  pthread_mutex_lock(&m_mutex);
+  std::unique_lock<std::mutex> lck(m_mutex);
 
   auto it = m_lockMap.find(lid);
   if(it == m_lockMap.end())
@@ -198,8 +191,7 @@ lock_client_cache::retry_handler(lock_protocol::lockid_t lid,
   }
 
   it->second.retry = true;
-  pthread_cond_signal(&it->second.retryQueue);
-  pthread_mutex_unlock(&m_mutex);
+  retryQueue.notify_one();
   return ret;
 }
 

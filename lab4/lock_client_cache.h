@@ -6,6 +6,8 @@
 
 #include <string>
 #include <map>
+#include <mutex>
+#include <condition_variable>
 #include "lock_protocol.h"
 #include "rpc.h"
 #include "lock_client.h"
@@ -50,21 +52,17 @@ private:
     bool retry;
     lock_state state;
 
-    pthread_cond_t waitQueue;
-    pthread_cond_t releaseQueue;
-    pthread_cond_t retryQueue;
-
     lock_entry() : revoked(false), retry(false), state(NONE)
     {
-      pthread_cond_init(&waitQueue, NULL);
-      pthread_cond_init(&releaseQueue, NULL);
-      pthread_cond_init(&retryQueue, NULL);
     }
   };
 
   std::map<lock_protocol::lockid_t, lock_entry> m_lockMap;
-  pthread_mutex_t m_mutex;
-};
+  std::mutex m_mutex;
 
+  std::condition_variable waitQueue;
+  std::condition_variable releaseQueue;
+  std::condition_variable retryQueue;
+};
 
 #endif
