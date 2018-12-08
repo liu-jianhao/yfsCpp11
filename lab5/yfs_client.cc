@@ -1,6 +1,7 @@
 // yfs client.  implements FS operations using extent and lock server
 #include "yfs_client.h"
 #include "extent_client.h"
+#include "extent_client_cache.h"
 // #include "lock_client.h"
 #include "lock_client_cache.h"
 #include <sstream>
@@ -14,9 +15,13 @@
 
 yfs_client::yfs_client(std::string extent_dst, std::string lock_dst)
 {
-  ec = new extent_client(extent_dst);
+  // ec = new extent_client(extent_dst);
   // m_lc = new lock_client(lock_dst);
-  m_lc = new lock_client_cache(lock_dst);
+  extent_client_cache *temp;
+  temp = new extent_client_cache (extent_dst);
+	ec = temp;
+	lock_user *lu = new lock_user(temp);
+  m_lc = new lock_client_cache(lock_dst, lu);
 }
 
 yfs_client::inum
@@ -59,6 +64,7 @@ yfs_client::getfile(inum inum, fileinfo &fin)
 
   printf("getfile %016llx\n", inum);
   extent_protocol::attr a;
+  LockGuard lg(m_lc, inum);
   if (ec->getattr(inum, a) != extent_protocol::OK) {
     r = IOERR;
     goto release;
@@ -84,6 +90,7 @@ yfs_client::getdir(inum inum, dirinfo &din)
 
   printf("getdir %016llx\n", inum);
   extent_protocol::attr a;
+  LockGuard lg(m_lc, inum);
   if (ec->getattr(inum, a) != extent_protocol::OK) {
     r = IOERR;
     goto release;
@@ -144,6 +151,7 @@ yfs_client::lookup(inum parent, const char* name, inum& inum, bool* found)
   size_t pos, end;
   std::string data, file_name, ino;
 
+  LockGuard lg(m_lc, parent);
   if(ec->get(parent, data) != extent_protocol::OK)
   {
     return IOERR;
@@ -179,6 +187,7 @@ yfs_client::readdir(inum inum, std::list<dirent> & dirents)
 {
   std::string data, inum_str;
   size_t pos, name_end, name_len, inum_end, inum_len;
+  LockGuard lg(m_lc, inum);
   if(ec->get(inum, data) != extent_protocol::OK)
   {
     return IOERR;
@@ -238,6 +247,7 @@ yfs_client::read(inum inum, off_t off, size_t size, std::string &buf)
 {
   std::string data;
   size_t read_size;
+  LockGuard lg(m_lc, inum);
   if(ec->get(inum, data) != extent_protocol::OK)
   {
     return IOERR;

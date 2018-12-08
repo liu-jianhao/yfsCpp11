@@ -131,6 +131,7 @@ lock_client_cache::release(lock_protocol::lockid_t lid)
     it->second.revoked = false;
 
     lck.unlock();
+    lu->dorelease(lid);
     ret = cl->call(lock_protocol::release, lid, id, r);
     lck.lock();
 
@@ -165,6 +166,7 @@ lock_client_cache::revoke_handler(lock_protocol::lockid_t lid,
   {
     it->second.state = RELEASING;
     lck.unlock();
+    lu->dorelease(lid);
     cl->call(lock_protocol::release, lid, id, r);
     lck.lock();
 

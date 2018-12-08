@@ -1,57 +1,160 @@
-# Lab4：锁缓存
-这次实验实现在锁客户端缓存锁,减轻锁服务器的负载. 
+# Lab5：扩展缓存
+这次实验需要为YFS添加扩展缓存，这样可以减小扩展服务器的负载、提高YFS的性能。
 
-例如应用使用YFS在同一目录下连续创建100个文件,按照LAB 3 的实现,需要`acquire`100次目录锁,同样也需要`release`100次. 这种方式增加了锁服务器的负载,其实只需要`acquire`一次锁,然后缓存锁,最后使用完后再释放就可以了,这样之前的100次`acquire`和100次`release`只需要1次`acquire`和1次`release`.
-
-本次实验实现`acquire`锁后在锁客户端缓存锁, 当有其他客户端需要该锁时再释放该锁.
-
-## 设计协议
-1. 每个客户端可能有多个线程获取同一个锁,但是每一个客户端只允许一个线程(并不要求是哪个特定的线程,而是不允许多个线程与锁服务器交互)与锁服务器进行交互, 一旦一个线程已经获取到锁,然后释放锁就可以唤醒同一客户端在等待的其他线程
-
-2. 当一个客户端使用`acquire`RPC请求一个锁,如果锁没有被其他的客户端获取(FREE),那么锁服务器返回OK, 如果锁不是FREE,并且有其他的客户端等待这个锁,那么返回一个ENTRY. 如果锁不是FREE,并且没有其他客户端等待这个锁,那么锁服务器`revoke` RPC到锁的拥有者,等待锁的拥有者释放这个锁,最终锁服务器发送一个`retry` RPC给等待该锁的下一个客户端,通知它再次尝试获取.
-
-3. 一旦一个客户端拥有了一个锁,那么客户端缓存这个锁(即当释放这个锁时并不发送一个release RPC给锁服务器). 客户端可以将锁给同一个客户端的其他线程而且不需要与服务器交互.
-
-4. 锁服务器通过发送一个`revoke` RPC给客户端来收回客户端缓存的锁,这个`revoke`请求告诉客户端当`release`锁时立即将锁返回给服务器,或者如果没有线程当前持有这个锁,那么就立即将锁返回给锁服务器.
-
-5. 锁服务器应该记录每个锁的持有者ID(hostname:port),这样锁服务器才知道`revoke` RPC发送给哪个客户端. 另外还需要记录哪些客户端在等待这个锁,这样锁服务器可以向其中一个发送retry RPC.
-
-6. 当发送一个RPC时不要持有任何mutex, RPC通常需要较长的时间,这会让其他的线程一直等待,另为在RPC时持有mutex容易导致分布式锁死.
+这次实验的主要难点是确保扩展缓存的一致性：确保每个客户端都能看到最新的修改。
+我们可以通过lab4的缓存锁服务来实现一致性。
 
 
-### 锁客户端协议处理
-锁客户端中缓存的锁有下面5个状态:
-+ NONE: 客户端不知道该锁的任何信息,该锁可能还在服务器上,或者被别的客户端持有.
-+ FREE:当前客户端拥有这个锁,并且在这个客户端上没有线程持有这个锁.
-+ LOCKED: 当前客户端拥有这个锁,并且锁被某个线程持有.
-+ ACQUIRGING: 当前客户端有线程正在向服务器尝试获取这个锁.
-+ RELEASING 当前客户端正在尝试将锁返回给服务器.
+## 扩展缓存
+用`extent_client_cache`继承`extent_client`，还要把`extent_client`中的`get`等方法改为虚函数，
+这样之前的通过指针调用就会调用到子类的方法。
+```cpp
+class extent_client_cache : public extent_client {
+    enum state {
+        NONE,       // 文件内容不存在
+        UPDATE,     // 缓存了文件内容且文件内容未被修改
+        MODIFIED,   // 缓存了文件内容且文件内容已被修改
+        REMOVED      // 文件已被删除
+    };
 
+    struct extent {
+        std::string data;
+        state m_state;
+        extent_protocol::attr attr;
+        extent() : m_state(NONE) {}
+    };
 
-### 锁服务器端协议处理
-锁服务器端的锁有下面四个状态:
-+ FREE: 该锁未被任何客户端持有
-+ LOCKED: 锁被某个客户端持有,没有其他客户端等待该锁
-+ LOCKED_AND_WAIT: 锁被某个客户端持有,并且有其他客户端等待该锁
-+ RETRYING: 锁服务器正在向某个客户端发送retry RPC.
+private:
+    std::mutex m_mutex;
+    std::map<extent_protocol::extentid_t, extent> m_cache;
+
+public:
+    extent_client_cache(std::string dst);
+    extent_protocol::status get(extent_protocol::extentid_t eid,
+                                std::string &buf);
+    extent_protocol::status getattr(extent_protocol::extentid_t eid,
+                                    extent_protocol::attr &a);
+    extent_protocol::status put(extent_protocol::extentid_t eid, std::string buf);
+    extent_protocol::status remove(extent_protocol::extentid_t eid);
+    extent_protocol::status flush(extent_protocol::extentid_t eid);
+};
+```
+
+之后要实现`get`等虚函数：
+```cpp
+extent_protocol::status
+extent_client_cache::get(extent_protocol::extentid_t eid, std::string &buf)
+{
+    extent_protocol::status ret = extent_protocol::OK;
+
+    std::lock_guard<std::mutex> lg(m_mutex);
+
+    if(m_cache.count(eid))
+    {
+        switch (m_cache[eid].m_state)
+        {
+            case UPDATE:
+            case MODIFIED:
+                // 直接从缓存获取数据
+                buf = m_cache[eid].data;
+                m_cache[eid].attr.atime = time(NULL);
+                break;
+
+            case NONE:
+                ret = cl->call(extent_protocol::get, eid, buf);
+                // 更新缓存
+                if(ret == extent_protocol::OK)
+                {
+                    m_cache[eid].data = buf;
+                    m_cache[eid].m_state = UPDATE;
+                    m_cache[eid].attr.atime = time(NULL);
+                    m_cache[eid].attr.size = buf.size();
+                }
+                break;
+
+            case REMOVED:
+                ret = extent_protocol::NOENT;
+                break;
+        }
+    }
+    // 缓存中没有数据
+    else
+    {
+        ret = cl->call(extent_protocol::get, eid, buf);
+        if (ret == extent_protocol::OK)
+        {
+            m_cache[eid].data = buf;
+            m_cache[eid].m_state = UPDATE;
+            m_cache[eid].attr.atime = time(NULL);
+            m_cache[eid].attr.size = buf.size();
+            m_cache[eid].attr.ctime = 0;
+            m_cache[eid].attr.mtime = 0;
+        }
+    }
+
+    return ret;
+}
+```
+
+## 缓存一致性
+因为在文件的读写都在文件缓存中进行,为了保证一致性(即读操作获取的内容必须是最近的写操作写的内容),
+
+yfs采用**释放一致性**来保证一致性. 因为yfs中文件的id(i-number号)和锁id时同样的值，当释放一个锁回锁服务器时，必须确保文件内容客户端(extent_client)中对应的缓存文件也flush回了文件内容服务(extent_server).并且从缓存中删除这个文件，
+
+flush操作检查文件内容是否已经修改，如果是则讲新的内容put到文件内容服务.如果文件被删除(即状态REMOVED),那么从文件内容服务上删除这个文件.
+
+例如客户端A获取一个文件的锁，然后从文件内容服务get文件的内容.并在本地缓存中修改这个文件的内容，
+此时客户端B也尝试获取这个文件的锁，这时锁服务器给客户端A发送revoke消息，然后客户端A在将锁释放回锁服务器前先把已修改的文件内容flush回文件内容服务，
+
+然后客户端B会获取到这个锁，在从文件内容服务get文件内容(B的缓存中不会已经缓存了这个文件,所以必须访问文件内容服务.如果曾经缓存了，在释放锁时也将这个项缓存删除了).这时客户端B获取到的内容就是A修改后的内容.
+
+在`yfs_client`中需要用到这个类，在发送`release`RPC之前需要调用`dorelease`。
+```cpp
+class lock_user : public lock_release_user {
+private:
+  extent_client_cache *ec;
+public:
+  lock_user(extent_client_cache *e) : ec(e) {}
+  // dorelease在将锁释放回服务器时调用
+  void dorelease(lock_protocol::lockid_t lid)
+  {
+    ec->flush(lid); 
+  }
+};
+```
 
 
 ## 测试
-其中一个终端：
-```shell
-$ export RPC_LOSSY=0
-$ ./lock_server 3772
+在完成lab5之前：
 ```
-另一个终端：
-```shell
-$ ./lock_tester 3772
-cache lock client
-acquire a release a acquire a release a
+$ export RPC_COUNT=25
+$ ./start.sh
+$ ./test-lab-3-c ./yfs1 ./yfs2
+Create/delete in separate directories: tests completed OK
+$ grep "RPC STATS" extent_server.log
 ...
-...
-./lock_tester: passed all tests successfully
+RPC STATS: 1:2 6001:804 6002:2218 6003:1878 6004:198
 ```
-开启RPC丢失后重复上面的测试：
-```shell
-export RPC_LOSSY = 5 
+可以看到很多PRC请求(省略了一百多个)。
+
+之后:
 ```
+$ grep "RPC STATS" extent_server.log
+grep "RPC STATS" extent_server.log
+RPC STATS: 1:2 6002:4 6003:19 
+RPC STATS: 1:2 6002:4 6003:44 
+RPC STATS: 1:2 6001:3 6002:17 6003:53 
+RPC STATS: 1:2 6001:3 6002:38 6003:57 
+RPC STATS: 1:2 6001:3 6002:59 6003:61 
+RPC STATS: 1:2 6001:3 6002:82 6003:63 
+RPC STATS: 1:2 6001:3 6002:104 6003:66 
+RPC STATS: 1:2 6001:3 6002:125 6003:70 
+RPC STATS: 1:2 6001:3 6002:147 6003:73 
+RPC STATS: 1:2 6001:3 6002:169 6003:76 
+RPC STATS: 1:2 6001:3 6002:191 6003:79 
+RPC STATS: 1:2 6001:3 6002:213 6003:82 
+RPC STATS: 1:2 6001:3 6002:235 6003:85 
+RPC STATS: 1:2 6001:4 6002:254 6003:90 
+RPC STATS: 1:2 6001:5 6002:263 6003:105 
+```
+可以看出RPC请求少了许多。

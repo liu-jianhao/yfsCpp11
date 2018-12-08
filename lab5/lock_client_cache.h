@@ -11,6 +11,7 @@
 #include "lock_protocol.h"
 #include "rpc.h"
 #include "lock_client.h"
+#include "extent_client_cache.h"
 #include "lang/verify.h"
 
 // Classes that inherit lock_release_user can override dorelease so that 
@@ -20,6 +21,18 @@ class lock_release_user {
  public:
   virtual void dorelease(lock_protocol::lockid_t) = 0;
   virtual ~lock_release_user() {};
+};
+
+class lock_user : public lock_release_user {
+private:
+  extent_client_cache *ec;
+public:
+  lock_user(extent_client_cache *e) : ec(e) {}
+  // dorelease在将锁释放回服务器时调用
+  void dorelease(lock_protocol::lockid_t lid)
+  {
+    ec->flush(lid); 
+  }
 };
 
 class lock_client_cache : public lock_client {

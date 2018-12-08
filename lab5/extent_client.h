@@ -8,18 +8,20 @@
 #include "rpc.h"
 
 class extent_client {
- private:
+//  private:
+// 为了能让子类访问
+protected:
   rpcc *cl;
 
  public:
   extent_client(std::string dst);
 
-  extent_protocol::status get(extent_protocol::extentid_t eid, 
+  virtual extent_protocol::status get(extent_protocol::extentid_t eid, 
 			      std::string &buf);
-  extent_protocol::status getattr(extent_protocol::extentid_t eid, 
+  virtual extent_protocol::status getattr(extent_protocol::extentid_t eid, 
 				  extent_protocol::attr &a);
-  extent_protocol::status put(extent_protocol::extentid_t eid, std::string buf);
-  extent_protocol::status remove(extent_protocol::extentid_t eid);
+  virtual extent_protocol::status put(extent_protocol::extentid_t eid, std::string buf);
+  virtual extent_protocol::status remove(extent_protocol::extentid_t eid);
 };
 
 #endif 
