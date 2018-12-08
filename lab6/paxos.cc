@@ -153,7 +153,54 @@ proposer::prepare(unsigned instance, std::vector<std::string> &accepts,
   // You fill this in for Lab 6
   // Note: if got an "oldinstance" reply, commit the instance using
   // acc->commit(...), and return false.
-  return false;
+
+  prop_t max;
+  max.n = 0;
+  max.m = std::string();
+
+  paxos_protocol::preparearg a;
+  a.instance = instance;
+  a.n = my_n;
+  paxos_protocol::prepareres r;
+
+  paxos_protocol::status ret;
+
+  for(auto it = nodes.begin(); it != nodes.end(); ++it)
+  {
+    handle h(*it);
+
+    pthread_mutex_unlock(&pxs_mutex);
+    rpcc *cl = h.safebind();
+    if(cl)
+    {
+      ret = cl->call(paxos_protocol::preparereq, me, a, r, rpcc::to(1000));
+    }
+    pthread_mutex_lock(&pxs_mutex);
+
+    if(cl)
+    {
+      if(ret == paxos_protocol::OK)
+      {
+        // oldinstance为true说明未批准
+        if(r.oldinstance)
+        {
+          acc->commit(instance, r.v_a);
+          return false;
+        }
+        else if(r.accept)
+        {
+          accepts.push_back(*it);
+          if(r.n_a > max)
+          {
+            v = r.v_a;
+            max = r.n_a;
+          }
+        }
+      }
+    }
+  }
+
+  return true;
 }
 
 // run() calls this to send out accept RPCs to accepts.
@@ -163,6 +210,34 @@ proposer::accept(unsigned instance, std::vector<std::string> &accepts,
         std::vector<std::string> nodes, std::string v)
 {
   // You fill this in for Lab 6
+  paxos_protocol::status ret;
+  paxos_protocol::acceptarg a;
+  a.instance = instance;
+  a.n = my_n;
+  a.v = v;
+
+  bool r;
+
+  for(auto it = nodes.begin(); it != nodes.end(); ++it)
+  {
+    handle h(*it);
+
+    pthread_mutex_unlock(&pxs_mutex);
+    rpcc *cl = h.safebind();
+    if(cl)
+    {
+      ret = cl->call(paxos_protocol::acceptreq, me, a, r, rpcc::to(1000));
+    }
+    pthread_mutex_lock(&pxs_mutex);
+
+    if(cl)
+    {
+      if(ret == paxos_protocol::OK && r)
+      {
+        accepts.push_back(*it);
+      }
+    }
+  }
 }
 
 void
@@ -170,6 +245,25 @@ proposer::decide(unsigned instance, std::vector<std::string> accepts,
 	      std::string v)
 {
   // You fill this in for Lab 6
+  paxos_protocol::status ret;
+  paxos_protocol::decidearg a;
+  a.instance = instance;
+  a.v = v;
+
+  int r;
+
+  for(auto it = accepts.begin(); it != accepts.end(); ++it)
+  {
+    handle h(*it);
+
+    pthread_mutex_unlock(&pxs_mutex);
+    rpcc *cl = h.safebind();
+    if(cl)
+    {
+      ret = cl->call(paxos_protocol::decidereq, me, a, r, rpcc::to(1000));
+    }
+    pthread_mutex_lock(&pxs_mutex);
+  }
 }
 
 acceptor::acceptor(class paxos_change *_cfg, bool _first, std::string _me, 
@@ -205,8 +299,34 @@ acceptor::preparereq(std::string src, paxos_protocol::preparearg a,
   // You fill this in for Lab 6
   // Remember to initialize *BOTH* r.accept and r.oldinstance appropriately.
   // Remember to *log* the proposal if the proposal is accepted.
-  return paxos_protocol::OK;
+  ScopedLock ml(&pxs_mutex);
+  // 每个instance代表状态机的轮次
+  // 该轮次小于之前已经决定的最大的轮次，则拒绝
+  if(a.instance <= instance_h)
+  {
+    r.oldinstance = true;
+    r.accept = false;
+    r.v_a = values[a.instance];
+  }
+  // 轮次大于，并且请求的proposal number该acceptor见过的最大的还大，则该acceptor 批准该proposal
+  else if(a.n > n_h)
+  {
+    n_h = a.n;
+    r.n_a = n_a;
+    r.v_a = v_a;
+    r.oldinstance = false;
+    r.accept = true;
+    // 写入日志，持久化
+    l->logprop(n_h);
+  }
+  // 小于或等于见过的最大的proposal number，acceptor拒绝
+  else
+  {
+    r.oldinstance = false;
+    r.accept = false;
+  }
 
+  return paxos_protocol::OK;
 }
 
 // the src argument is only for debug purpose
@@ -215,6 +335,19 @@ acceptor::acceptreq(std::string src, paxos_protocol::acceptarg a, bool &r)
 {
   // You fill this in for Lab 6
   // Remember to *log* the accept if the proposal is accepted.
+  ScopedLock ml(&pxs_mutex);
+  if(a.n >= n_h)
+  {
+    n_a = a.n;
+    v_a = a.v;
+    r = true;
+    // 写入日志，持久化
+    l->logaccept(n_a, v_a);
+  }
+  else
+  {
+    r = false;
+  }
 
   return paxos_protocol::OK;
 }
