@@ -29,6 +29,8 @@ void
 rsm_client::primary_failure()
 {
   // You fill this in for Lab 7
+  primary = known_mems.back();
+  known_mems.pop_back();
 }
 
 rsm_protocol::status
