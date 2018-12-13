@@ -9,6 +9,7 @@
 #include "rpc.h"
 #include "lock_client.h"
 #include "lang/verify.h"
+#include "fifo.h"
 
 #include "rsm_client.h"
 
@@ -34,6 +35,44 @@ class lock_client_cache_rsm : public lock_client {
   std::string hostname;
   std::string id;
   lock_protocol::xid_t xid;
+
+  enum lock_state {
+    NONE,
+    FREE,
+    LOCKED,
+    ACQUIRING,
+    RELEASING
+  };
+
+  struct release_entry {
+    lock_protocol::lockid_t lid;
+    lock_protocol::xid_t xid;
+
+    release_entry(lock_protocol::lockid_t lid_ = 0, lock_protocol::xid_t xid_ = 0)
+            : lid(lid_), xid(xid_) {}
+  };
+  fifo<release_entry> releaseFifo;
+
+  struct lock_entry {
+    // 记录是否收到revokedRPC
+    bool revoked;
+    // 记录是否收到retryRPC
+    bool retry;
+    lock_state state;
+    lock_protocol::xid_t xid;
+
+    lock_entry() : revoked(false), retry(false), state(NONE), xid(0)
+    {
+    }
+  };
+
+  std::map<lock_protocol::lockid_t, lock_entry> m_lockMap;
+  std::mutex m_mutex;
+
+  std::condition_variable waitQueue;
+  std::condition_variable releaseQueue;
+  std::condition_variable retryQueue;
+
  public:
   static int last_port;
   lock_client_cache_rsm(std::string xdst, class lock_release_user *l = 0);

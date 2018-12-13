@@ -80,6 +80,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <unistd.h>
 
 #include "handle.h"
 #include "rsm.h"
@@ -95,7 +96,7 @@ recoverythread(void *x)
   return 0;
 }
 
-rsm::rsm(std::string _first, std::string _me) 
+rsm::rsm(std::string _first, std::string _me)
   : stf(0), primary(_first), insync (false), inviewchange (true), vid_commit(0),
     partitioned (false), dopartition(false), break1(false), break2(false)
 {
@@ -176,7 +177,7 @@ rsm::recovery()
     if (vid_insync != vid_commit)
       continue;
 
-    if (r) { 
+    if (r) {
       myvs.vid = vid_commit;
       myvs.seqno = 1;
       inviewchange = false;
@@ -191,7 +192,7 @@ rsm::sync_with_backups()
 {
   pthread_mutex_unlock(&rsm_mutex);
   {
-    // Make sure that the state of lock_server_cache_rsm is stable during 
+    // Make sure that the state of lock_server_cache_rsm is stable during
     // synchronization; otherwise, the primary's state may be more recent
     // than replicas after the synchronization.
     ScopedLock ml(&invoke_mutex);
@@ -236,17 +237,17 @@ rsm::statetransfer(std::string m)
   rsm_protocol::transferres r;
   handle h(m);
   int ret;
-  tprintf("rsm::statetransfer: contact %s w. my last_myvs(%d,%d)\n", 
+  tprintf("rsm::statetransfer: contact %s w. my last_myvs(%d,%d)\n",
 	 m.c_str(), last_myvs.vid, last_myvs.seqno);
   VERIFY(pthread_mutex_unlock(&rsm_mutex)==0);
   rpcc *cl = h.safebind();
   if (cl) {
-    ret = cl->call(rsm_protocol::transferreq, cfg->myaddr(), 
+    ret = cl->call(rsm_protocol::transferreq, cfg->myaddr(),
                              last_myvs, vid_insync, r, rpcc::to(1000));
   }
   VERIFY(pthread_mutex_lock(&rsm_mutex)==0);
   if (cl == 0 || ret != rsm_protocol::OK) {
-    tprintf("rsm::statetransfer: couldn't reach %s %lx %d\n", m.c_str(), 
+    tprintf("rsm::statetransfer: couldn't reach %s %lx %d\n", m.c_str(),
 	   (long unsigned) cl, ret);
     return false;
   }
@@ -254,7 +255,7 @@ rsm::statetransfer(std::string m)
     stf->unmarshal_state(r.state);
   }
   last_myvs = r.last;
-  tprintf("rsm::statetransfer transfer from %s success, vs(%d,%d)\n", 
+  tprintf("rsm::statetransfer transfer from %s success, vs(%d,%d)\n",
 	 m.c_str(), last_myvs.vid, last_myvs.seqno);
   return true;
 }
@@ -273,18 +274,18 @@ rsm::join(std::string m) {
   int ret;
   rsm_protocol::joinres r;
 
-  tprintf("rsm::join: %s mylast (%d,%d)\n", m.c_str(), last_myvs.vid, 
+  tprintf("rsm::join: %s mylast (%d,%d)\n", m.c_str(), last_myvs.vid,
           last_myvs.seqno);
   VERIFY(pthread_mutex_unlock(&rsm_mutex)==0);
   rpcc *cl = h.safebind();
   if (cl != 0) {
-    ret = cl->call(rsm_protocol::joinreq, cfg->myaddr(), last_myvs, 
+    ret = cl->call(rsm_protocol::joinreq, cfg->myaddr(), last_myvs,
 		   r, rpcc::to(120000));
   }
   VERIFY(pthread_mutex_lock(&rsm_mutex)==0);
 
   if (cl == 0 || ret != rsm_protocol::OK) {
-    tprintf("rsm::join: couldn't reach %s %p %d\n", m.c_str(), 
+    tprintf("rsm::join: couldn't reach %s %p %d\n", m.c_str(),
 	   cl, ret);
     return false;
   }
@@ -294,22 +295,22 @@ rsm::join(std::string m) {
 }
 
 /*
- * Config informs rsm whenever it has successfully 
+ * Config informs rsm whenever it has successfully
  * completed a view change
  */
-void 
-rsm::commit_change(unsigned vid) 
+void
+rsm::commit_change(unsigned vid)
 {
   ScopedLock ml(&rsm_mutex);
   commit_change_wo(vid);
 }
 
-void 
-rsm::commit_change_wo(unsigned vid) 
+void
+rsm::commit_change_wo(unsigned vid)
 {
   if (vid <= vid_commit)
     return;
-  tprintf("commit_change: new view (%d)  last vs (%d,%d) %s insync %d\n", 
+  tprintf("commit_change: new view (%d)  last vs (%d,%d) %s insync %d\n",
 	 vid, last_myvs.vid, last_myvs.seqno, primary.c_str(), insync);
   vid_commit = vid;
   inviewchange = true;
@@ -350,12 +351,12 @@ rsm::client_invoke(int procno, std::string req, std::string &r)
   return ret;
 }
 
-// 
-// The primary calls the internal invoke at each member of the
-// replicated state machine 
 //
-// the replica must execute requests in order (with no gaps) 
-// according to requests' seqno 
+// The primary calls the internal invoke at each member of the
+// replicated state machine
+//
+// the replica must execute requests in order (with no gaps)
+// according to requests' seqno
 
 rsm_protocol::status
 rsm::invoke(int proc, viewstamp vs, std::string req, int &dummy)
@@ -369,18 +370,18 @@ rsm::invoke(int proc, viewstamp vs, std::string req, int &dummy)
  * RPC handler: Send back the local node's state to the caller
  */
 rsm_protocol::status
-rsm::transferreq(std::string src, viewstamp last, unsigned vid, 
+rsm::transferreq(std::string src, viewstamp last, unsigned vid,
 rsm_protocol::transferres &r)
 {
   ScopedLock ml(&rsm_mutex);
   int ret = rsm_protocol::OK;
   // Code will be provided in Lab 7
-  tprintf("transferreq from %s (%d,%d) vs (%d,%d)\n", src.c_str(), 
+  tprintf("transferreq from %s (%d,%d) vs (%d,%d)\n", src.c_str(),
 	 last.vid, last.seqno, last_myvs.vid, last_myvs.seqno);
   if (!insync || vid != vid_insync) {
      return rsm_protocol::BUSY;
   }
-  if (stf && last != last_myvs) 
+  if (stf && last != last_myvs)
     r.state = stf->marshal_state();
   r.last = last_myvs;
   return ret;
@@ -412,7 +413,7 @@ rsm::joinreq(std::string m, viewstamp last, rsm_protocol::joinres &r)
   int ret = rsm_protocol::OK;
 
   ScopedLock ml(&rsm_mutex);
-  tprintf("joinreq: src %s last (%d,%d) mylast (%d,%d)\n", m.c_str(), 
+  tprintf("joinreq: src %s last (%d,%d) mylast (%d,%d)\n", m.c_str(),
 	 last.vid, last.seqno, last_myvs.vid, last_myvs.seqno);
   if (cfg->ismember(m, vid_commit)) {
     tprintf("joinreq: is still a member\n");
@@ -421,7 +422,7 @@ rsm::joinreq(std::string m, viewstamp last, rsm_protocol::joinres &r)
     tprintf("joinreq: busy\n");
     ret = rsm_protocol::BUSY;
   } else {
-    // We cache vid_commit to avoid adding m to a view which already contains 
+    // We cache vid_commit to avoid adding m to a view which already contains
     // m due to race condition
     unsigned vid_cache = vid_commit;
     VERIFY (pthread_mutex_unlock(&rsm_mutex) == 0);
@@ -440,7 +441,7 @@ rsm::joinreq(std::string m, viewstamp last, rsm_protocol::joinres &r)
 
 /*
  * RPC handler: Send back all the nodes this local knows about to client
- * so the client can switch to a different primary 
+ * so the client can switch to a different primary
  * when it existing primary fails
  */
 rsm_client_protocol::status
@@ -510,11 +511,11 @@ rsm::net_repair_wo(bool heal)
   rsmrpc->set_reachable(heal);
 }
 
-rsm_test_protocol::status 
+rsm_test_protocol::status
 rsm::test_net_repairreq(int heal, int &r)
 {
   ScopedLock ml(&rsm_mutex);
-  tprintf("rsm::test_net_repairreq: %d (dopartition %d, partitioned %d)\n", 
+  tprintf("rsm::test_net_repairreq: %d (dopartition %d, partitioned %d)\n",
 	 heal, dopartition, partitioned);
   if (heal) {
     net_repair_wo(heal);
@@ -529,7 +530,7 @@ rsm::test_net_repairreq(int heal, int &r)
 
 // simulate failure at breakpoint 1 and 2
 
-void 
+void
 rsm::breakpoint1()
 {
   if (break1) {
@@ -538,7 +539,7 @@ rsm::breakpoint1()
   }
 }
 
-void 
+void
 rsm::breakpoint2()
 {
   if (break2) {
@@ -547,7 +548,7 @@ rsm::breakpoint2()
   }
 }
 
-void 
+void
 rsm::partition1()
 {
   if (dopartition) {
