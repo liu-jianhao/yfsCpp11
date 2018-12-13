@@ -40,6 +40,7 @@ lock_client_cache_rsm::lock_client_cache_rsm(std::string xdst,
   // You fill this in Step Two, Lab 7
   // - Create rsmc, and use the object to do RPC 
   //   calls instead of the rpcc object of lock_client
+  rsmc = new rsm_client(xdst);
 
   pthread_t th;
   int r = pthread_create(&th, NULL, &releasethread, (void *) this);
@@ -63,7 +64,7 @@ lock_client_cache_rsm::releaser()
       lu->dorelease(e.lid);
     }  
     int r;
-    cl->call(lock_protocol::release, e.lid, id, e.xid, r);
+    rsmc->call(lock_protocol::release, e.lid, id, e.xid, r);
 
     std::unique_lock<std::mutex> lck(m_mutex);
     auto it = m_lockMap.find(e.lid);
@@ -101,7 +102,7 @@ lock_client_cache_rsm::acquire(lock_protocol::lockid_t lid)
         it->second.xid = xid;
         xid++;
         lck.unlock();
-        ret = cl->call(lock_protocol::acquire, lid, id, it->second.xid, r);
+        ret = rsmc->call(lock_protocol::acquire, lid, id, it->second.xid, r);
         lck.lock();
 
         // 成功获得锁
@@ -141,7 +142,7 @@ lock_client_cache_rsm::acquire(lock_protocol::lockid_t lid)
           xid++;
 
           lck.unlock();
-          ret = cl->call(lock_protocol::acquire, lid, id, it->second.xid, r);
+          ret = rsmc->call(lock_protocol::acquire, lid, id, it->second.xid, r);
           lck.lock();
 
           if(ret == lock_protocol::OK)
@@ -191,7 +192,7 @@ lock_client_cache_rsm::release(lock_protocol::lockid_t lid)
     {
       lu->dorelease(lid);
     }
-    ret = cl->call(lock_protocol::release, lid, id, it->second.xid, r);
+    ret = rsmc->call(lock_protocol::release, lid, id, it->second.xid, r);
     lck.lock();
 
     it->second.state = NONE;
@@ -223,6 +224,7 @@ lock_client_cache_rsm::revoke_handler(lock_protocol::lockid_t lid,
     return lock_protocol::NOENT;
   }
 
+  VERIFY(it->second.xid == xid);
   if (it->second.state == FREE)
   {
     it->second.state = RELEASING;

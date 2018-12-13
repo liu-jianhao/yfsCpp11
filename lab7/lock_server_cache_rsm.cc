@@ -34,6 +34,8 @@ lock_server_cache_rsm::lock_server_cache_rsm(class rsm *_rsm)
   VERIFY (r == 0);
   r = pthread_create(&th, NULL, &retrythread, (void *) this);
   VERIFY (r == 0);
+
+  rsm->set_state_transfer(this);
 }
 
 void
@@ -48,9 +50,12 @@ lock_server_cache_rsm::revoker()
     revoke_retry_entry e;
     revokeQueue.deq(&e);
 
-    int r;
-    rpcc *cl = handle(e.id).safebind();
-    cl->call(rlock_protocol::revoke, e.lid, e.xid, r);
+    if (rsm->amiprimary())
+    {
+      int r;
+      rpcc *cl = handle(e.id).safebind();
+      cl->call(rlock_protocol::revoke, e.lid, e.xid, r);
+    }
   }
 }
 
@@ -67,9 +72,12 @@ lock_server_cache_rsm::retryer()
     revoke_retry_entry e;
     retryQueue.deq(&e);
 
-    int r;
-    rpcc *cl = handle(e.id).safebind();
-    cl->call(rlock_protocol::retry, e.lid, e.xid, r);
+    if (rsm->amiprimary())
+    {
+      int r;
+      rpcc *cl = handle(e.id).safebind();
+      cl->call(rlock_protocol::retry, e.lid, e.xid, r);
+    }
   }
 }
 
@@ -215,12 +223,111 @@ lock_server_cache_rsm::marshal_state()
 {
   std::ostringstream ost;
   std::string r;
+
+  std::lock_guard<std::mutex> lg(m_mutex);
+  marshall m;
+  unsigned int size = m_lockMap.size();
+  m << size;
+  for(auto it = m_lockMap.begin(); it != m_lockMap.end(); ++it)
+  {
+    m << it->first;
+    m << static_cast<unsigned int>(it->second.state);
+    m << it->second.owner;
+    m << it->second.revoked;
+
+    size = it->second.waitSet.size();
+    m << size;
+    for(auto it_set = it->second.waitSet.begin(); it_set != it->second.waitSet.end(); ++it_set)
+    {
+      m << *it_set;
+    }
+
+    size = it->second.highest_xid_from_client.size();
+    m << size;
+    for(auto it_client = it->second.highest_xid_from_client.begin();
+          it_client != it->second.highest_xid_from_client.end(); ++it_client)
+    {
+      m << it_client->first;
+      m << it_client->second;
+    }
+
+    size = it->second.highest_xid_acquire_reply.size();
+    m << size;
+    for(auto it_acquire = it->second.highest_xid_acquire_reply.begin();
+          it_acquire != it->second.highest_xid_acquire_reply.end(); ++it_acquire)
+    {
+      m << it_acquire->first;
+      m << it_acquire->second;
+    }
+
+    size = it->second.highest_xid_release_reply.size();
+    m << size;
+    for(auto it_release = it->second.highest_xid_release_reply.begin();
+          it_release != it->second.highest_xid_release_reply.end(); ++it_release)
+    {
+      m << it_release->first;
+      m << it_release->second;
+    }
+  }
+  r = m.str();
+
+
   return r;
 }
 
 void
 lock_server_cache_rsm::unmarshal_state(std::string state)
 {
+  std::lock_guard<std::mutex> lg(m_mutex);
+  
+  unmarshall m;
+  unsigned int size;
+  m >> size;
+  for(auto it = m_lockMap.begin(); it != m_lockMap.end(); ++it)
+  {
+    lock_protocol::lockid_t lid;
+    m >> lid;
+    lock_entry *entry = new lock_entry();
+    unsigned int state;
+    m >> state;
+    entry->state = static_cast<lock_state>(state);
+    m >> entry->owner;
+    m >> entry->revoked;
+
+    unsigned int waitSet_size;
+    m >> waitSet_size; 
+    std::string waitid;
+    for(unsigned int i = 0; i < waitSet_size; ++i)
+    {
+      m >> waitid;
+      entry->waitSet.insert(waitid);
+    }
+
+    unsigned int xid_size;
+    m >> xid_size;
+		std::string client_id;
+		lock_protocol::xid_t xid;
+		for (unsigned int i = 0; i < xid_size; i++) {
+			m >> client_id;
+			m >> xid;
+		   	entry->highest_xid_from_client[client_id] = xid;
+		}
+		unsigned int reply_size;
+		m >> reply_size;
+		int ret;
+		for (unsigned int i = 0; i < reply_size; i++) {
+			m >> client_id;
+			m >> ret;
+			entry->highest_xid_acquire_reply[client_id] = ret; 
+		}
+		m >> reply_size;
+		for (unsigned int i = 0; i < reply_size; i++) {
+			m >> client_id;
+			m >> ret;
+			entry->highest_xid_release_reply[client_id] = ret;
+		}
+		m_lockMap[lid] = *entry;
+  }
 }
 
 lock_protocol::status

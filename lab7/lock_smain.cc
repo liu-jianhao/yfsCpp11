@@ -50,7 +50,7 @@ main(int argc, char *argv[])
 #define	RSM
 #ifdef RSM
 // You must comment out the next line once you are done with Step One.
-#define STEP_ONE 
+// #define STEP_ONE 
 #ifdef STEP_ONE
   rpcs server(atoi(argv[1]));
   lock_server_cache_rsm ls;
