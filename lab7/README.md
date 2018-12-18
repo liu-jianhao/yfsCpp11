@@ -1,279 +1,112 @@
-# Lab6：Paxos
-
-之前的实现中没有考虑锁服务器会失败的情形，考虑到这种情形我们采用`replicated state machine(RSM)`方法来备份锁服务器
-
-RSM基本的想法是这些机器初始状态相同，那么执行相同的操作系列后状态也是相同的. 
-
-因为网络乱序等原因，无法保证所有备份机器收到的操作请求序列都是相同的，所以采用一机器为master,master从客户端接受请求,决定请求次序，然后发送给各个备份机器，然后以相同的次序在所有备份(replicas)机器上执行，master等待所有备份机器返回，然后master返回给客户端，当master失败，任何一个备份(replicas)可以接管工作.因为他们都有相同的状态.
-
-上面的RSM的核心是要所有机器达成一个协议:哪一个备份(replica)是master,而哪些slave机器是正在运行的(alive),并没有fail.因为任何机器在任何时刻都有可能失败
+# Lab7：Replicated State Machine
 
 
-## 实现Paxos
-先理解论文内容，看懂下面的伪代码:
-```
-proposer run(instance, v):
- choose n, unique and higher than any n seen so far
- send prepare(instance, n) to all servers including self
- if oldinstance(instance, instance_value) from any node:
-   commit to the instance_value locally
- else if prepare_ok(n_a, v_a) from majority:
-   v' = v_a with highest n_a; choose own v otherwise
-   send accept(instance, n, v') to all
-   if accept_ok(n) from majority:
-     send decided(instance, v') to all
+复制状态机实现了一个主服务器和几个备份。
+主服务器接收请求，根据接收的顺序给每一个请求分配一个`view stamp`(一个`vid`和一个顺序的数字)，并转发到所有备份。
 
-acceptor state:
- must persist across reboots
- n_h (highest prepare seen)
- instance_h, (highest instance accepted)
- n_a, v_a (highest accept seen)
+一个备份按照`view stamp`的顺序执行请求并返回`OK`给主服务器。
 
-acceptor prepare(instance, n) handler:
- if instance <= instance_h
-   reply oldinstance(instance, instance_value)
- else if n > n_h
-   n_h = n
-   reply prepare_ok(n_a, v_a)
- else
-   reply prepare_reject
+主服务器在收到所有备份的`OK`之后执行请求，并发送回复信息给客户。
 
-acceptor accept(instance, n, v) handler:
- if n >= n_h
-   n_a = n
-   v_a = v
-   reply accept_ok(n)
- else
-   reply accept_reject
+`config`模块将告诉`RSM`一个新的`view`。如果前一个`view`的主服务器是新`view`的成员，那么它依旧是主服务器。否则，前一个`view`中的最小数字节点将会是新的主服务器。其他情况下，主服务器将会是前一个`view`中的成员。
 
-acceptor decide(instance, v) handler:
- paxos_commit(instance, v)
-```
+配置模块为`RSM`构建顺序的`views`，`RSM`确保它们总会只有一个主服务器，这个主服务器是前一个`view`的成员。
 
-`paxos.cc`是Paxos算法的实现的主要过程。
+当一个新节点开始，`recovery thread`会让它加入到`RSM`中。它将收集主服务器的内部RSM状态；主服务器让配置模块添加新的节点并且返回内部RSM状态。因为只有一个主服务器，所以所有添加都会很有秩序。
 
-### Phase1
-```cpp
-bool
-proposer::prepare(unsigned instance, std::vector<std::string> &accepts, 
-         std::vector<std::string> nodes,
-         std::string &v)
-{
-  prop_t max;
-  max.n = 0;
-  max.m = std::string();
-
-  paxos_protocol::preparearg a;
-  a.instance = instance;
-  a.n = my_n;
-  paxos_protocol::prepareres r;
-
-  paxos_protocol::status ret;
-
-  for(auto it = nodes.begin(); it != nodes.end(); ++it)
-  {
-    handle h(*it);
-
-    pthread_mutex_unlock(&pxs_mutex);
-    rpcc *cl = h.safebind();
-    if(cl)
-    {
-      ret = cl->call(paxos_protocol::preparereq, me, a, r, rpcc::to(1000));
-    }
-    pthread_mutex_lock(&pxs_mutex);
-
-    if(cl)
-    {
-      if(ret == paxos_protocol::OK)
-      {
-        // oldinstance为true说明未批准
-        if(r.oldinstance)
-        {
-          acc->commit(instance, r.v_a);
-          return false;
-        }
-        else if(r.accept)
-        {
-          accepts.push_back(*it);
-          if(r.n_a > max)
-          {
-            v = r.v_a;
-            max = r.n_a;
-          }
-        }
-      }
-    }
-  }
-
-  return true;
-}
-```
-
-下面的函数是RPC调用，可以被每个服务器调用
-```cpp
-paxos_protocol::status
-acceptor::preparereq(std::string src, paxos_protocol::preparearg a,
-    paxos_protocol::prepareres &r)
-{
-  ScopedLock ml(&pxs_mutex);
-  // 每个instance代表状态机的轮次
-  // 该轮次小于之前已经决定的最大的轮次，则拒绝
-  if(a.instance <= instance_h)
-  {
-    r.oldinstance = true;
-    r.accept = false;
-    r.v_a = values[a.instance];
-  }
-  // 轮次大于，并且请求的proposal number该acceptor见过的最大的还大，则该acceptor 批准该proposal
-  else if(a.n > n_h)
-  {
-    n_h = a.n;
-    r.n_a = n_a;
-    r.v_a = v_a;
-    r.oldinstance = false;
-    r.accept = true;
-    // 写入日志，持久化
-    l->logprop(n_h);
-  }
-  // 小于或等于见过的最大的proposal number，acceptor拒绝
-  else
-  {
-    r.oldinstance = false;
-    r.accept = false;
-  }
-
-  return paxos_protocol::OK;
-}
-```
+`recovery thread`也会运行在一个`view`变化(例如一个节点失败)。一种失败的情况是：一些备份已经执行了请求，但是主服务器没有，但是执行的结果对于客户来说是不可见的。
 
 
-### Phase2
-```cpp
-void
-proposer::accept(unsigned instance, std::vector<std::string> &accepts,
-        std::vector<std::string> nodes, std::string v)
-{
-  paxos_protocol::status ret;
-  paxos_protocol::acceptarg a;
-  a.instance = instance;
-  a.n = my_n;
-  a.v = v;
+当`RSM`在发生`view`变化时(一个节点失败，一个新的`view`形成，但是同步没有完成)，这也是一种失败情况。
+有两个变量来追踪这些情况：
++ `inviewchange`：一个节点失败了，`RSM`正在进行`view`变化
++ `insync`：节点正在同步它的状态
 
-  bool r;
+一个请求不应该被阻塞。
 
-  for(auto it = nodes.begin(); it != nodes.end(); ++it)
-  {
-    handle h(*it);
++ RSM module：管理复制
++ config module：管理`view`
++ Paxos module：管理paxos来达成一致
+每一个module都有各自的线程和内部的锁。
 
-    pthread_mutex_unlock(&pxs_mutex);
-    rpcc *cl = h.safebind();
-    if(cl)
-    {
-      ret = cl->call(paxos_protocol::acceptreq, me, a, r, rpcc::to(1000));
-    }
-    pthread_mutex_lock(&pxs_mutex);
+当`acceptor`在某一轮中批准了一个`value`，一个线程会`invoke`通知更高层这个`value`。
 
-    if(cl)
-    {
-      if(ret == paxos_protocol::OK && r)
-      {
-        accepts.push_back(*it);
-      }
-    }
-  }
-}
-```
+## 问题
+1. 什么是`view`?
+其实在上一次的实验报告中已经了解过了。一个`view`就是当前服务器集群的状态。
+例如有a、b、c三个服务器，此时的`view`就是`{a b c}`，如果某个时刻c宕机了，那么`view`就需要改变，变为`{a b}`
 
-与Prepare一样，accept也是RPC调用
-```cpp
-paxos_protocol::status
-acceptor::acceptreq(std::string src, paxos_protocol::acceptarg a, bool &r)
-{
-  ScopedLock ml(&pxs_mutex);
-  if(a.n >= n_h)
-  {
-    n_a = a.n;
-    v_a = a.v;
-    r = true;
-    // 写入日志，持久化
-    l->logaccept(n_a, v_a);
-  }
-  else
-  {
-    r = false;
-  }
-
-  return paxos_protocol::OK;
-}
-```
-
-## Phase3
-```cpp
-void
-proposer::decide(unsigned instance, std::vector<std::string> accepts, 
-	      std::string v)
-{
-  paxos_protocol::status ret;
-  paxos_protocol::decidearg a;
-  a.instance = instance;
-  a.v = v;
-
-  int r;
-
-  for(auto it = accepts.begin(); it != accepts.end(); ++it)
-  {
-    handle h(*it);
-
-    pthread_mutex_unlock(&pxs_mutex);
-    rpcc *cl = h.safebind();
-    if(cl)
-    {
-      ret = cl->call(paxos_protocol::decidereq, me, a, r, rpcc::to(1000));
-    }
-    pthread_mutex_lock(&pxs_mutex);
-  }
-}
-```
-
-```cpp
-paxos_protocol::status
-acceptor::decidereq(std::string src, paxos_protocol::decidearg a, int &r)
-{
-  ScopedLock ml(&pxs_mutex);
-  tprintf("decidereq for accepted instance %d (my instance %d) v=%s\n", 
-	 a.instance, instance_h, v_a.c_str());
-  if (a.instance == instance_h + 1) {
-    VERIFY(v_a == a.v);
-    commit_wo(a.instance, v_a);
-  } else if (a.instance <= instance_h) {
-    // we are ahead ignore.
-  } else {
-    // we are behind
-    VERIFY(0);
-  }
-  return paxos_protocol::OK;
-}
-```
+2. `config`模块是怎么发现`view`需要改变？
+通过心跳。
 
 
-## 测试
-```shell
-% ./rsm_tester.pl 0 1 2 3 4 5 6 7 
-test0: start 3-process lock server
-...
-test1: start 3-process lock server, kill third server
-...
-test2: start 3-process lock server, kill first server
-...
-test3: start 3-process lock_server, kill a server, restart a server
-...
-test4: 3-process lock_server, kill third server, kill second server, restart third server, kill third server again, restart second server, re-restart third server, check logs
-...
-test5: 3-process lock_server, send signal 1 to first server, kill third server, restart third server, check logs
-...
-test6: 4-process lock_server, send signal 2 to first server, kill fourth server, restart fourth server, check logs
-...
-test7: 4-process lock_server, send signal 2 to first server, kill fourth server, kill other servers, restart other servers, restart fourth server, check logs Start lock_server on 28286
-...
-tests done OK
-```
+## setp one：重新设计锁缓存服务器和客户端
+与lab4不同的是，锁缓存服务器和客户端都有较大的不同，特别是在lab4中，当`lock_server_cache`发送`revoke`RPC给锁持有者，这是是要等待回复的，
+但在lab7中，是不需要这样的，是通过后台线程实现的。
+
+在新的锁缓存服务器和客户端要解决两个问题：
+1. 要避免死锁。死锁可能是由RSM层当要调用`acquire、release`时持有`invoke_mutex`。
+  + 解决办法：避免在RPC handler中调用RPC
+  + 在`lock_client_cache_rsm`中有`releaser`后台线程
+  + 在`lock_server_cache_rsm`中有`retryer`和`revoker`两个后台线程
+  + 在lab4中，当`lock_server_cache`发送`revoke`RPC给锁持有者，这是是要等待回复的，
+但在lab7中，是不需要这样的，是通过后台线程实现的。
+
+2. 锁缓存客户端应该可以处理主锁服务器failed的情况。
+
+在知道了上面的问题后，我们就可以动手修改lab4写的代码了。
+
+需要修改的地方：
+1. `lock_client_cache_rsm`
+  1. `releaser`后台线程：从队列里取出请求信息，调用RPC
+  2. `revoke_handler`RPC handler：往队列里添加请求信息
+  3. ...
+2. `lock_server_cache_rsm`
+  1. `retryer`和`revoker`后台线程：从队列里取出请求信息，调用RPC
+  2. `acquire`和`release`：都需要一些修改，不再需要RPC call
+  3. ...
+
+
+
+## step two：不考虑失败的RSM
+流程：
+1. RSM客户端发送`invoke`RPC请求给主服务器
+2. 主服务器分配传来的`invoke`RPC按`view stamp`的顺序给从服务器。
+3. 从服务器执行请求，返回OK给主服务器
+4. 主服务器执行请求，返回OK给客户
+
+
++ `rsm::client_invoke()`:
+  + 给客户调用的，发送RSM请求给主服务器
+  + 如果RSM副本正在`view change`返回`BUSY`
+  + 如果RSM副本不是主服务器，返回`NOTPRIMARY`
+  + 如果是主服务器，按照上面的流程执行
+
++ `rsm::invoke`：
+  + 给主服务器调用的，发送给从服务器
+
++ `rsm::inviewchange`：
+
+
+## step three：考虑副本失败和实现状态转移
+节点失败需要`recovery`，然后重新加入，因此需要数据的持久化和恢复数据。
+
+流程：
+1. Paxos 一致性
+2. 下一个`view`
+3. `commit_change` -> 新的`view`形成 -> `inviewchange = true`
+4. 该节点还需要恢复RSM状态，在继续执行RSM请求前要`rsm::recovery`
+5. `recovery`结束 -> `inviewchange = false`
+
+
+## step four：考虑主服务器失败
+`rsm_client::primary_failure`
+
+
+## step five：处理更复杂的失败
+在`lock_client_cache_rsm`中的`acquire`中的需要重试的情况要添加超时，
+如果没有设置超时，客户就会被卡死，在测试12时会卡死。
+
+如果之前写的都正确，第五步基本不用改什么代码。
+
+现在可以通过所有测试了。

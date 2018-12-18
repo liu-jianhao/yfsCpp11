@@ -51,6 +51,7 @@ class lock_client_cache_rsm : public lock_client {
     release_entry(lock_protocol::lockid_t lid_ = 0, lock_protocol::xid_t xid_ = 0)
             : lid(lid_), xid(xid_) {}
   };
+  // 这个队列是用来保存release RPC，在release 后台线程中会用到
   fifo<release_entry> releaseFifo;
 
   struct lock_entry {

@@ -415,7 +415,7 @@ rsm::client_invoke(int procno, std::string req, std::string &r)
 
     // Release rsm_mutex once we have got invoke_mutex.
     pthread_mutex_unlock(&rsm_mutex);
-
+    bool first = true;
     for (const std::string &member : members) {
       if (member == cfg->myaddr()) {
         continue;
@@ -428,6 +428,14 @@ rsm::client_invoke(int procno, std::string req, std::string &r)
           cl->call(rsm_protocol::invoke, procno, vs, req, dummy_r, rpcc::to(1000)) != rsm_protocol::OK) {
         tprintf("client_invoke: failed to invoke slave %s.\n", member.c_str());
         return rsm_client_protocol::BUSY;
+      }
+
+      if(first)
+      {
+        first = false;
+        // 在主服务器完成调用对一个从服务器调用RSM请求之后在它继续向其它从服务器发出RSM请求之前，主服务器crash
+        breakpoint1();
+        partition1();
       }
     }
 
@@ -468,6 +476,9 @@ rsm::invoke(int proc, viewstamp vs, std::string req, int &dummy)
     myvs.seqno++;
     std::string r;
     execute(proc, req, r);
+
+    // 在从服务器完成执行请求后crash
+    breakpoint1();
   }
 
   return ret;

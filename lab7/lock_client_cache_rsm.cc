@@ -5,6 +5,7 @@
 #include "rpc.h"
 #include <sstream>
 #include <iostream>
+#include <chrono>
 #include <stdio.h>
 #include "tprintf.h"
 
@@ -116,7 +117,11 @@ lock_client_cache_rsm::acquire(lock_protocol::lockid_t lid)
         {
           if(!it->second.retry)
           {
-            retryQueue.wait(lck);
+            auto now = std::chrono::system_clock::now();
+            if(retryQueue.wait_until(lck, now + std::chrono::seconds(3)) == std::cv_status::timeout)
+            {
+              it->second.retry = true;
+            }
           }
         }
         break;
@@ -154,7 +159,11 @@ lock_client_cache_rsm::acquire(lock_protocol::lockid_t lid)
           {
             if(!it->second.retry)
             {
-              retryQueue.wait(lck);
+              auto now = std::chrono::system_clock::now();
+              if(retryQueue.wait_until(lck, now + std::chrono::seconds(3)) == std::cv_status::timeout)
+              {
+                it->second.retry = true;
+              }
             }
           }
         }
@@ -187,12 +196,14 @@ lock_client_cache_rsm::release(lock_protocol::lockid_t lid)
     it->second.state = RELEASING;
     it->second.revoked = false;
 
+    lock_protocol::xid_t cur_xid = it->second.xid;
+
     lck.unlock();
     if(lu)
     {
       lu->dorelease(lid);
     }
-    ret = rsmc->call(lock_protocol::release, lid, id, it->second.xid, r);
+    ret = rsmc->call(lock_protocol::release, lid, id, cur_xid, r);
     lck.lock();
 
     it->second.state = NONE;
@@ -224,7 +235,6 @@ lock_client_cache_rsm::revoke_handler(lock_protocol::lockid_t lid,
     return lock_protocol::NOENT;
   }
 
-  VERIFY(it->second.xid == xid);
   if (it->second.state == FREE)
   {
     it->second.state = RELEASING;
@@ -251,7 +261,6 @@ lock_client_cache_rsm::retry_handler(lock_protocol::lockid_t lid,
     return lock_protocol::NOENT;
   }
 
-  VERIFY(it->second.xid == xid);
   it->second.retry = true;
   retryQueue.notify_one();
   return ret;
