@@ -1,6 +1,10 @@
 # yfsCpp11
 yfs是一个分布式文件系统
 
+![](https://img-blog.csdnimg.cn/20190222184912911.jpg)
+`yfs`可以看作是客户端，客户端首先要从的`lock server`中获得锁，之后才能与共享的`extent server`(实际存储数据的服务器)通信，
+这种架构能有利于提高添加客户端的效率。
+
 ## lab1-lab7小结
 ### lab1：实现锁服务器
 #### Q&A
